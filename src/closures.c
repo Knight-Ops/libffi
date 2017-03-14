@@ -32,6 +32,31 @@
 
 #include <ffi.h>
 #include <ffi_common.h>
+#include <stdlib.h>
+
+static void
+on_allocate (void *base_address, size_t size)
+{
+}
+
+static void
+on_deallocate (void *base_address, size_t size)
+{
+}
+
+static ffi_mem_callbacks mem_callbacks = {
+  malloc,
+  calloc,
+  free,
+  on_allocate,
+  on_deallocate
+};
+
+void
+ffi_set_mem_callbacks (const ffi_mem_callbacks *callbacks)
+{
+  mem_callbacks = *callbacks;
+}
 
 #if !FFI_MMAP_EXEC_WRIT && !FFI_EXEC_TRAMPOLINE_TABLE
 # if __gnu_linux__ && !defined(__ANDROID__)
@@ -247,6 +272,29 @@ static int dlmunmap(void *, size_t);
 #define munmap dlmunmap
 
 #include "dlmalloc.c"
+
+void
+ffi_deinit (void)
+{
+  msegmentptr sp;
+
+  sp = &gm->seg;
+  while (sp != NULL)
+    {
+      char *base = sp->base;
+      size_t size = sp->size;
+      flag_t flag = get_segment_flags (sp);
+
+      sp = sp->next;
+
+      if ((flag & IS_MMAPPED_BIT) && !(flag & EXTERN_BIT))
+        {
+          CALL_MUNMAP (base, size);
+        }
+    }
+
+  (void) DESTROY_LOCK (&gm->mutex);
+}
 
 #undef mmap
 #undef munmap
@@ -505,6 +553,9 @@ dlmmap_locked (void *start, size_t length, int prot, int flags, off_t offset)
 
   execsize += length;
 
+  mem_callbacks.on_allocate (ptr, length);
+  mem_callbacks.on_allocate (start, length);
+
   return start;
 }
 
@@ -528,12 +579,16 @@ dlmmap (void *start, size_t length, int prot,
   if (execfd == -1 && is_emutramp_enabled ())
     {
       ptr = mmap (start, length, prot & ~PROT_EXEC, flags, fd, offset);
+      if (ptr != MFAIL)
+        mem_callbacks.on_allocate (ptr, length);
       return ptr;
     }
 
   if (execfd == -1 && !is_selinux_enabled ())
     {
       ptr = mmap (start, length, prot | PROT_EXEC, flags, fd, offset);
+      if (ptr != MFAIL)
+        mem_callbacks.on_allocate (ptr, length);
 
       if (ptr != MFAIL || (errno != EPERM && errno != EACCES))
 	/* Cool, no need to mess with separate segments.  */
@@ -569,6 +624,7 @@ dlmunmap (void *start, size_t length)
      Yuck.  */
   msegmentptr seg = segment_holding (gm, start);
   void *code;
+  int ret;
 
 #if FFI_CLOSURE_TEST
   printf ("unmapping %zi\n", length);
@@ -576,12 +632,17 @@ dlmunmap (void *start, size_t length)
 
   if (seg && (code = add_segment_exec_offset (start, seg)) != start)
     {
-      int ret = munmap (code, length);
+      ret = munmap (code, length);
       if (ret)
 	return ret;
+      else
+        mem_callbacks.on_deallocate (code, length);
     }
 
-  return munmap (start, length);
+  ret = munmap (start, length);
+  if (ret == 0)
+    mem_callbacks.on_deallocate (start, length);
+  return ret;
 }
 
 #if FFI_CLOSURE_FREE_CODE
@@ -675,14 +736,21 @@ ffi_closure_alloc (size_t size, void **code)
   if (!code)
     return NULL;
 
-  return *code = malloc (size);
+  return *code = mem_callbacks.malloc (size);
 }
 
 void
 ffi_closure_free (void *ptr)
 {
-  free (ptr);
+  mem_callbacks.free (ptr);
 }
 
 # endif /* ! FFI_MMAP_EXEC_WRIT */
+#else
+
+void
+ffi_deinit (void)
+{
+}
+
 #endif /* FFI_CLOSURES */

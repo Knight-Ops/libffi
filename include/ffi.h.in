@@ -441,6 +441,17 @@ void ffi_call(ffi_cif *cif,
 /* Useful for eliminating compiler warnings */
 #define FFI_FN(f) ((void (*)(void))f)
 
+typedef struct {
+  void* (*malloc)(size_t);
+  void* (*calloc)(size_t,size_t);
+  void  (*free)(void*);
+  void  (*on_allocate)(void*,size_t);
+  void  (*on_deallocate)(void*,size_t);
+} ffi_mem_callbacks;
+
+void ffi_deinit (void);
+void ffi_set_mem_callbacks (const ffi_mem_callbacks *callbacks);
+
 /* ---- Definitions shared with assembly code ---------------------------- */
 
 #endif
